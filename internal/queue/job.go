@@ -1,9 +1,13 @@
 package queue
 
 import (
-	"github.com/google/uuid"
+	"errors"
 	"time"
+
+	"github.com/google/uuid"
 )
+
+var ErrNotFound = errors.New("not found")
 
 type Status string
 
@@ -12,6 +16,7 @@ const (
 	StatusRunning   Status = "running"
 	StatusSucceeded Status = "succeeded"
 	StatusFailed    Status = "failed"
+	StatusCancelled Status = "cancelled"
 )
 
 type Job struct {

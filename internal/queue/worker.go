@@ -15,6 +15,7 @@ type WorkerPool struct {
 	handlers    map[string]HandlerFunc
 	store       Store
 	mu          sync.RWMutex
+	wg          sync.WaitGroup
 }
 
 func NewWorkerPool(concurrency int, store Store) *WorkerPool {
@@ -37,33 +38,47 @@ func (p *WorkerPool) Available() int {
 
 func (p *WorkerPool) Submit(job *Job) {
 	p.sem <- struct{}{}
+	p.wg.Add(1)
 	go func() {
-		defer func() { <-p.sem }()
+		defer func() {
+			<-p.sem
+			p.wg.Done()
+		}()
 		p.execute(context.Background(), job)
 	}()
 }
+
+func (p *WorkerPool) Wait() { p.wg.Wait() }
 
 func (p *WorkerPool) execute(ctx context.Context, job *Job) {
 	p.mu.RLock()
 	handler, ok := p.handlers[job.Kind]
 	p.mu.RUnlock()
 	if !ok {
-		slog.Warn("No handler for job moving to DLQ", "kind", job.Kind, "id", job.ID)
-		_ = p.store.MoveToDLQ(ctx, job)
+		slog.Warn("no handler for job, moving to DLQ", "kind", job.Kind, "id", job.ID)
+		if err := p.store.MoveToDLQ(ctx, job); err != nil {
+			slog.Error("failed to move job to DLQ", "id", job.ID, "err", err)
+		}
 		return
 	}
 	err := handler(ctx, job)
 	if err == nil {
-		_ = p.store.MarkSucceeded(ctx, job.ID.String())
+		if err := p.store.MarkSucceeded(ctx, job.ID.String()); err != nil {
+			slog.Error("failed to mark job succeeded", "id", job.ID, "err", err)
+		}
 		return
 	}
 	slog.Warn("job failed", "id", job.ID, "attempt", job.Attempts, "max", job.MaxAttempts, "err", err)
 	if job.Attempts >= job.MaxAttempts {
 		slog.Warn("job exhausted retries, moving to DLQ", "id", job.ID)
-		_ = p.store.MoveToDLQ(ctx, job)
+		if err := p.store.MoveToDLQ(ctx, job); err != nil {
+			slog.Error("failed to move job to DLQ", "id", job.ID, "err", err)
+		}
 		return
 	}
 	backoff := time.Duration(1<<uint(job.Attempts)) * 30 * time.Second
 	nextRunAt := time.Now().Add(backoff)
-	_ = p.store.MarkFailed(ctx, job.ID.String(), err, &nextRunAt)
+	if err := p.store.MarkFailed(ctx, job.ID.String(), err, &nextRunAt); err != nil {
+		slog.Error("failed to mark job failed", "id", job.ID, "err", err)
+	}
 }

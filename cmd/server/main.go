@@ -4,8 +4,10 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,8 +20,12 @@ import (
 
 func main() {
 	cfg := config.Load()
-	slog.Info("connecting to db", "dsn", cfg.DatabseURL)
-	db, err := sqlx.Connect("postgres", cfg.DatabseURL)
+	if u, err := url.Parse(cfg.DatabaseURL); err == nil {
+		slog.Info("connecting to db", "host", u.Host, "dbname", strings.TrimPrefix(u.Path, "/"))
+	} else {
+		slog.Info("connecting to db")
+	}
+	db, err := sqlx.Connect("postgres", cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("failed to connect to database", "err", err)
 		os.Exit(1)

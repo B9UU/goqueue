@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -38,7 +39,11 @@ func (r *Router) getJob(w http.ResponseWriter, req *http.Request) {
 	id := req.PathValue("id")
 	job, err := r.store.GetJob(req.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "job not found")
+		if errors.Is(err, queue.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "job not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
@@ -59,7 +64,11 @@ func (r *Router) listJobs(w http.ResponseWriter, req *http.Request) {
 func (r *Router) cancelJob(w http.ResponseWriter, req *http.Request) {
 	id := req.PathValue("id")
 	if err := r.store.CancelJob(req.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		if errors.Is(err, queue.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "job not found or not cancellable")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

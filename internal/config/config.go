@@ -7,7 +7,7 @@ import (
 )
 
 type Config struct {
-	DatabseURL        string
+	DatabaseURL       string
 	Port              string
 	WorkerConcurrency int
 	PollInterval      time.Duration
@@ -15,7 +15,7 @@ type Config struct {
 
 func Load() *Config {
 	return &Config{
-		DatabseURL:        getEnv("DATABASE_URL", "postgres://goqueue:secret@172.23.16.1:5432/goqueue?sslmode=disable"),
+		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		Port:              getEnv("PORT", "8080"),
 		WorkerConcurrency: getEnvInt("WORKER_CONCURRENCY", 10),
 		PollInterval:      getEnvDuration("POLL_INTERVAL", 2*time.Second),

@@ -2,7 +2,9 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -107,6 +109,9 @@ func (s *PostgresStore) MarkFailed(ctx context.Context, id string, jobErr error,
 func (s *PostgresStore) GetJob(ctx context.Context, id string) (*Job, error) {
 	var job Job
 	err := s.db.GetContext(ctx, &job, `SELECT * FROM jobs WHERE id = $1`, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
 	return &job, err
 }
 
@@ -127,8 +132,18 @@ func (s *PostgresStore) ListJobs(ctx context.Context, queue string, status Statu
 }
 
 func (s *PostgresStore) CancelJob(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE jobs SET status = 'failed', finished_at = NOW()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE jobs SET status = 'cancelled', finished_at = NOW()
 		WHERE id = $1 AND status = 'pending'`, id)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
