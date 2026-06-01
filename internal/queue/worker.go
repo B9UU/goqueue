@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 type HandlerFunc func(ctx context.Context, job *Job) error
@@ -56,8 +57,13 @@ func (p *WorkerPool) execute(ctx context.Context, job *Job) {
 		_ = p.store.MarkSucceeded(ctx, job.ID.String())
 		return
 	}
-	slog.Warn("Job failed", "id", job.ID, "attempt", job.Attempts, "err", err)
-	// TODO: retry logic
-	_ = p.store.MarkFailed(ctx, job.ID.String(), err)
-
+	slog.Warn("job failed", "id", job.ID, "attempt", job.Attempts, "max", job.MaxAttempts, "err", err)
+	if job.Attempts >= job.MaxAttempts {
+		slog.Warn("job exhausted retries, moving to DLQ", "id", job.ID)
+		_ = p.store.MoveToDLQ(ctx, job)
+		return
+	}
+	backoff := time.Duration(1<<uint(job.Attempts)) * 30 * time.Second
+	nextRunAt := time.Now().Add(backoff)
+	_ = p.store.MarkFailed(ctx, job.ID.String(), err, &nextRunAt)
 }

@@ -1,2 +1,0 @@
-- [ ] add workers retries
-
