@@ -16,6 +16,7 @@ import (
 
 // apiMockStore implements queue.Store for handler tests.
 type apiMockStore struct {
+	pingErr        error
 	enqueueResult  *queue.Job
 	enqueueErr     error
 	getJobResult   *queue.Job
@@ -26,8 +27,11 @@ type apiMockStore struct {
 	listDLQResult  []*queue.DeadLetterJob
 	listDLQErr     error
 	requeueDLQErr  error
+	getStatsResult *queue.Stats
+	getStatsErr    error
 }
 
+func (m *apiMockStore) Ping(_ context.Context) error { return m.pingErr }
 func (m *apiMockStore) Enqueue(_ context.Context, _ queue.EnqueueParams) (*queue.Job, error) {
 	return m.enqueueResult, m.enqueueErr
 }
@@ -50,6 +54,9 @@ func (m *apiMockStore) ListDLQ(_ context.Context, _ string, _, _ int) ([]*queue.
 	return m.listDLQResult, m.listDLQErr
 }
 func (m *apiMockStore) RequeueDLQ(_ context.Context, _ string) error { return m.requeueDLQErr }
+func (m *apiMockStore) GetStats(_ context.Context) (*queue.Stats, error) {
+	return m.getStatsResult, m.getStatsErr
+}
 
 func serve(store queue.Store, method, path string, body any) *httptest.ResponseRecorder {
 	var buf bytes.Buffer
@@ -59,7 +66,7 @@ func serve(store queue.Store, method, path string, body any) *httptest.ResponseR
 	req := httptest.NewRequest(method, path, &buf)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	NewRouter(store).ServeHTTP(rec, req)
+	NewRouter(store, nil).ServeHTTP(rec, req)
 	return rec
 }
 
@@ -67,6 +74,14 @@ func TestHealthz(t *testing.T) {
 	rec := serve(&apiMockStore{}, "GET", "/healthz", nil)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestHealthz_DBDown(t *testing.T) {
+	store := &apiMockStore{pingErr: errors.New("connection refused")}
+	rec := serve(store, "GET", "/healthz", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
 	}
 }
 
@@ -97,7 +112,7 @@ func TestEnqueue_MissingKind(t *testing.T) {
 func TestEnqueue_InvalidJSON(t *testing.T) {
 	req := httptest.NewRequest("POST", "/jobs", bytes.NewBufferString("not-json"))
 	rec := httptest.NewRecorder()
-	NewRouter(&apiMockStore{}).ServeHTTP(rec, req)
+	NewRouter(&apiMockStore{}, nil).ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rec.Code)
 	}
@@ -155,6 +170,14 @@ func TestListJobs(t *testing.T) {
 	}
 }
 
+func TestListJobs_StoreError(t *testing.T) {
+	store := &apiMockStore{listJobsErr: errors.New("db error")}
+	rec := serve(store, "GET", "/jobs", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
 func TestCancelJob(t *testing.T) {
 	rec := serve(&apiMockStore{}, "DELETE", "/jobs/"+uuid.New().String(), nil)
 	if rec.Code != http.StatusNoContent {
@@ -194,10 +217,59 @@ func TestListDLQ(t *testing.T) {
 	}
 }
 
+func TestListDLQ_StoreError(t *testing.T) {
+	store := &apiMockStore{listDLQErr: errors.New("db error")}
+	rec := serve(store, "GET", "/dlq", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
 func TestRetryDLQ(t *testing.T) {
 	rec := serve(&apiMockStore{}, "POST", "/dlq/"+uuid.New().String()+"/retry", nil)
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("expected 204, got %d", rec.Code)
+	}
+}
+
+func TestStats(t *testing.T) {
+	store := &apiMockStore{
+		getStatsResult: &queue.Stats{
+			Queues: map[string]queue.QueueStats{
+				"default": {Pending: 5, Running: 1},
+			},
+			DLQ: map[string]int{"default": 2},
+		},
+	}
+	rec := serve(store, "GET", "/stats", nil)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	var got queue.Stats
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Queues["default"].Pending != 5 {
+		t.Errorf("expected 5 pending, got %d", got.Queues["default"].Pending)
+	}
+	if got.DLQ["default"] != 2 {
+		t.Errorf("expected DLQ count 2, got %d", got.DLQ["default"])
+	}
+}
+
+func TestStats_StoreError(t *testing.T) {
+	store := &apiMockStore{getStatsErr: errors.New("db error")}
+	rec := serve(store, "GET", "/stats", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
+func TestRetryDLQ_NotFound(t *testing.T) {
+	store := &apiMockStore{requeueDLQErr: queue.ErrNotFound}
+	rec := serve(store, "POST", "/dlq/"+uuid.New().String()+"/retry", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
 	}
 }
 

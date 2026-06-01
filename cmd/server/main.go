@@ -13,9 +13,11 @@ import (
 
 	"github.com/b9uu/goqueue/internal/api"
 	"github.com/b9uu/goqueue/internal/config"
+	"github.com/b9uu/goqueue/internal/metrics"
 	"github.com/b9uu/goqueue/internal/queue"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func main() {
@@ -31,9 +33,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	m := metrics.New(prometheus.DefaultRegisterer)
 
 	store := queue.NewPostgresStore(db)
-	workers := queue.NewWorkerPool(cfg.WorkerConcurrency, store)
+	workers := queue.NewWorkerPool(cfg.WorkerConcurrency, store, m)
 
 	workers.Register("email", func(ctx context.Context, job *queue.Job) error {
 		slog.Info("sending email", "payload", string(job.Payload))
@@ -50,7 +57,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
-		Handler:      api.NewRouter(store),
+		Handler:      api.NewRouter(store, m),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -68,4 +75,6 @@ func main() {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
 	}
+	workers.Wait()
+	slog.Info("shutdown complete")
 }

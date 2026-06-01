@@ -11,7 +11,7 @@ import (
 func TestScheduler_Poll_ClaimsAndSubmitsJobs(t *testing.T) {
 	job := &Job{ID: uuid.New(), Kind: "work", MaxAttempts: 3, Attempts: 1}
 	store := &mockStore{claimJobsResult: []*Job{job}}
-	pool := NewWorkerPool(4, store)
+	pool := NewWorkerPool(4, store, nil)
 	pool.Register("work", func(_ context.Context, _ *Job) error { return nil })
 
 	sched := NewScheduler(store, pool, "default", time.Second)
@@ -33,7 +33,7 @@ func TestScheduler_Poll_ClaimsAndSubmitsJobs(t *testing.T) {
 
 func TestScheduler_Poll_SkipsWhenNoWorkersAvailable(t *testing.T) {
 	store := &mockStore{}
-	pool := NewWorkerPool(2, store)
+	pool := NewWorkerPool(2, store, nil)
 	// Fill all slots to simulate a full pool.
 	pool.sem <- struct{}{}
 	pool.sem <- struct{}{}
@@ -55,7 +55,7 @@ func TestScheduler_Poll_SkipsWhenNoWorkersAvailable(t *testing.T) {
 
 func TestScheduler_Run_StopsOnContextCancel(t *testing.T) {
 	store := &mockStore{}
-	pool := NewWorkerPool(2, store)
+	pool := NewWorkerPool(2, store, nil)
 	sched := NewScheduler(store, pool, "default", 10*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -75,7 +75,7 @@ func TestScheduler_Run_StopsOnContextCancel(t *testing.T) {
 
 func TestScheduler_Run_PollsRepeatedly(t *testing.T) {
 	store := &mockStore{}
-	pool := NewWorkerPool(4, store)
+	pool := NewWorkerPool(4, store, nil)
 	sched := NewScheduler(store, pool, "default", 10*time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)

@@ -6,14 +6,20 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/b9uu/goqueue/internal/metrics"
 	"github.com/b9uu/goqueue/internal/queue"
 )
 
 type Router struct {
-	store queue.Store
+	store   queue.Store
+	metrics *metrics.Metrics
 }
 
 func (r *Router) healthz(w http.ResponseWriter, req *http.Request) {
+	if err := r.store.Ping(req.Context()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "database unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -31,6 +37,9 @@ func (r *Router) enqueue(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if r.metrics != nil {
+		r.metrics.JobsEnqueued.WithLabelValues(job.Queue, job.Kind).Inc()
 	}
 	writeJSON(w, http.StatusCreated, job)
 }
@@ -86,10 +95,23 @@ func (r *Router) listDLQ(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusOK, jobs)
 }
 
+func (r *Router) stats(w http.ResponseWriter, req *http.Request) {
+	s, err := r.store.GetStats(req.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, s)
+}
+
 func (r *Router) retryDLQ(w http.ResponseWriter, req *http.Request) {
 	id := req.PathValue("id")
 	if err := r.store.RequeueDLQ(req.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		if errors.Is(err, queue.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "DLQ entry not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

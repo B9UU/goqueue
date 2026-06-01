@@ -32,8 +32,8 @@ func TestLoad_EnvOverrides(t *testing.T) {
 
 	cfg := Load()
 
-	if cfg.DatabseURL != "postgres://test:secret@localhost/testdb" {
-		t.Errorf("unexpected DATABASE_URL: %q", cfg.DatabseURL)
+	if cfg.DatabaseURL != "postgres://test:secret@localhost/testdb" {
+		t.Errorf("unexpected DATABASE_URL: %q", cfg.DatabaseURL)
 	}
 	if cfg.Port != "9090" {
 		t.Errorf("expected port 9090, got %q", cfg.Port)

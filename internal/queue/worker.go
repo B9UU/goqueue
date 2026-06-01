@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/b9uu/goqueue/internal/metrics"
 )
 
 type HandlerFunc func(ctx context.Context, job *Job) error
@@ -16,14 +18,16 @@ type WorkerPool struct {
 	store       Store
 	mu          sync.RWMutex
 	wg          sync.WaitGroup
+	metrics     *metrics.Metrics
 }
 
-func NewWorkerPool(concurrency int, store Store) *WorkerPool {
+func NewWorkerPool(concurrency int, store Store, m *metrics.Metrics) *WorkerPool {
 	return &WorkerPool{
 		concurrency: concurrency,
 		sem:         make(chan struct{}, concurrency),
 		handlers:    make(map[string]HandlerFunc),
 		store:       store,
+		metrics:     m,
 	}
 }
 
@@ -32,6 +36,7 @@ func (p *WorkerPool) Register(kind string, fn HandlerFunc) {
 	defer p.mu.Unlock()
 	p.handlers[kind] = fn
 }
+
 func (p *WorkerPool) Available() int {
 	return p.concurrency - len(p.sem)
 }
@@ -51,6 +56,15 @@ func (p *WorkerPool) Submit(job *Job) {
 func (p *WorkerPool) Wait() { p.wg.Wait() }
 
 func (p *WorkerPool) execute(ctx context.Context, job *Job) {
+	if p.metrics != nil {
+		p.metrics.WorkersActive.Inc()
+		start := time.Now()
+		defer func() {
+			p.metrics.WorkersActive.Dec()
+			p.metrics.JobDuration.WithLabelValues(job.Queue, job.Kind).Observe(time.Since(start).Seconds())
+		}()
+	}
+
 	p.mu.RLock()
 	handler, ok := p.handlers[job.Kind]
 	p.mu.RUnlock()
@@ -59,26 +73,45 @@ func (p *WorkerPool) execute(ctx context.Context, job *Job) {
 		if err := p.store.MoveToDLQ(ctx, job); err != nil {
 			slog.Error("failed to move job to DLQ", "id", job.ID, "err", err)
 		}
+		if p.metrics != nil {
+			p.metrics.JobsDLQ.WithLabelValues(job.Queue, job.Kind).Inc()
+		}
 		return
 	}
+
 	err := handler(ctx, job)
 	if err == nil {
 		if err := p.store.MarkSucceeded(ctx, job.ID.String()); err != nil {
 			slog.Error("failed to mark job succeeded", "id", job.ID, "err", err)
 		}
+		if p.metrics != nil {
+			p.metrics.JobsSucceeded.WithLabelValues(job.Queue, job.Kind).Inc()
+		}
 		return
 	}
+
 	slog.Warn("job failed", "id", job.ID, "attempt", job.Attempts, "max", job.MaxAttempts, "err", err)
 	if job.Attempts >= job.MaxAttempts {
 		slog.Warn("job exhausted retries, moving to DLQ", "id", job.ID)
 		if err := p.store.MoveToDLQ(ctx, job); err != nil {
 			slog.Error("failed to move job to DLQ", "id", job.ID, "err", err)
 		}
+		if p.metrics != nil {
+			p.metrics.JobsDLQ.WithLabelValues(job.Queue, job.Kind).Inc()
+		}
 		return
 	}
+
+	const maxBackoff = 24 * time.Hour
 	backoff := time.Duration(1<<uint(job.Attempts)) * 30 * time.Second
+	if backoff > maxBackoff || backoff < 0 {
+		backoff = maxBackoff
+	}
 	nextRunAt := time.Now().Add(backoff)
 	if err := p.store.MarkFailed(ctx, job.ID.String(), err, &nextRunAt); err != nil {
 		slog.Error("failed to mark job failed", "id", job.ID, "err", err)
+	}
+	if p.metrics != nil {
+		p.metrics.JobsFailed.WithLabelValues(job.Queue, job.Kind).Inc()
 	}
 }

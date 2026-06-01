@@ -12,6 +12,7 @@ import (
 )
 
 type Store interface {
+	Ping(ctx context.Context) error
 	Enqueue(ctx context.Context, p EnqueueParams) (*Job, error)
 	ClaimJobs(ctx context.Context, queue string, limit int) ([]*Job, error)
 	MarkSucceeded(ctx context.Context, id string) error
@@ -22,6 +23,20 @@ type Store interface {
 	CancelJob(ctx context.Context, id string) error
 	ListDLQ(ctx context.Context, queue string, limit, offset int) ([]*DeadLetterJob, error)
 	RequeueDLQ(ctx context.Context, id string) error
+	GetStats(ctx context.Context) (*Stats, error)
+}
+
+type QueueStats struct {
+	Pending   int `json:"pending"`
+	Running   int `json:"running"`
+	Succeeded int `json:"succeeded"`
+	Failed    int `json:"failed"`
+	Cancelled int `json:"cancelled"`
+}
+
+type Stats struct {
+	Queues map[string]QueueStats `json:"queues"`
+	DLQ    map[string]int        `json:"dlq"`
 }
 type DeadLetterJob struct {
 	ID        uuid.UUID `db:"id"         json:"id"`
@@ -40,6 +55,10 @@ type PostgresStore struct {
 
 func NewPostgresStore(db *sqlx.DB) *PostgresStore {
 	return &PostgresStore{db: db}
+}
+
+func (s *PostgresStore) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
 }
 
 func (s *PostgresStore) Enqueue(ctx context.Context, p EnqueueParams) (*Job, error) {

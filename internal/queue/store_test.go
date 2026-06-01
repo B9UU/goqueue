@@ -215,6 +215,28 @@ func TestPostgresStore_CancelJob(t *testing.T) {
 	}
 }
 
+func TestPostgresStore_CancelJob_NotFound(t *testing.T) {
+	store := NewPostgresStore(testDB(t))
+
+	// Non-existent job.
+	err := store.CancelJob(context.Background(), "00000000-0000-0000-0000-000000000000")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestPostgresStore_CancelJob_AlreadyRunning(t *testing.T) {
+	store := NewPostgresStore(testDB(t))
+	enqueueJob(t, store, "test-cancel-running", "task")
+	claimed := claimOne(t, store, "test-cancel-running")
+
+	// Running jobs cannot be cancelled.
+	err := store.CancelJob(context.Background(), claimed.ID.String())
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound for running job, got %v", err)
+	}
+}
+
 func TestPostgresStore_MoveToDLQ(t *testing.T) {
 	store := NewPostgresStore(testDB(t))
 	job := enqueueJob(t, store, "test-dlq", "task")
@@ -340,6 +362,39 @@ func TestPostgresStore_ClaimJobs_RespectsPriority(t *testing.T) {
 	}
 	if jobs[0].Kind != "high-pri" {
 		t.Errorf("expected high-priority job to be claimed first, got kind=%q", jobs[0].Kind)
+	}
+}
+
+func TestPostgresStore_RequeueDLQ_NotFound(t *testing.T) {
+	store := NewPostgresStore(testDB(t))
+	err := store.RequeueDLQ(context.Background(), "00000000-0000-0000-0000-000000000000")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestPostgresStore_GetStats(t *testing.T) {
+	store := NewPostgresStore(testDB(t))
+	ctx := context.Background()
+
+	enqueueJob(t, store, "test-stats", "task")
+	enqueueJob(t, store, "test-stats", "task")
+	claimOne(t, store, "test-stats")
+
+	stats, err := store.GetStats(ctx)
+	if err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
+
+	qs, ok := stats.Queues["test-stats"]
+	if !ok {
+		t.Fatal("expected stats for queue 'test-stats'")
+	}
+	if qs.Pending != 1 {
+		t.Errorf("expected 1 pending, got %d", qs.Pending)
+	}
+	if qs.Running != 1 {
+		t.Errorf("expected 1 running, got %d", qs.Running)
 	}
 }
 

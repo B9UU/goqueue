@@ -28,6 +28,7 @@ type mockStore struct {
 	onDLQ       func()
 }
 
+func (m *mockStore) Ping(_ context.Context) error                             { return nil }
 func (m *mockStore) Enqueue(_ context.Context, _ EnqueueParams) (*Job, error) { return nil, nil }
 func (m *mockStore) ClaimJobs(_ context.Context, _ string, _ int) ([]*Job, error) {
 	m.mu.Lock()
@@ -75,6 +76,9 @@ func (m *mockStore) ListJobs(_ context.Context, _ string, _ Status, _, _ int) ([
 func (m *mockStore) ListDLQ(_ context.Context, _ string, _, _ int) ([]*DeadLetterJob, error) {
 	return nil, nil
 }
+func (m *mockStore) GetStats(_ context.Context) (*Stats, error) {
+	return &Stats{Queues: make(map[string]QueueStats), DLQ: make(map[string]int)}, nil
+}
 
 func (m *mockStore) snapshot() (succeeded, failed, dlq int) {
 	m.mu.Lock()
@@ -91,7 +95,7 @@ func makeJob(kind string, attempts, maxAttempts int) *Job {
 func TestWorkerPool_SuccessfulJob(t *testing.T) {
 	t.Parallel()
 	store := &mockStore{}
-	pool := NewWorkerPool(2, store)
+	pool := NewWorkerPool(2, store, nil)
 	pool.Register("task", func(_ context.Context, _ *Job) error { return nil })
 
 	pool.execute(context.Background(), makeJob("task", 1, 3))
@@ -105,7 +109,7 @@ func TestWorkerPool_SuccessfulJob(t *testing.T) {
 func TestWorkerPool_NoHandler_MovesToDLQ(t *testing.T) {
 	t.Parallel()
 	store := &mockStore{}
-	pool := NewWorkerPool(2, store)
+	pool := NewWorkerPool(2, store, nil)
 
 	pool.execute(context.Background(), makeJob("unknown", 1, 3))
 
@@ -118,7 +122,7 @@ func TestWorkerPool_NoHandler_MovesToDLQ(t *testing.T) {
 func TestWorkerPool_FailedJob_Retries(t *testing.T) {
 	t.Parallel()
 	store := &mockStore{}
-	pool := NewWorkerPool(2, store)
+	pool := NewWorkerPool(2, store, nil)
 	pool.Register("flaky", func(_ context.Context, _ *Job) error {
 		return errors.New("transient error")
 	})
@@ -144,7 +148,7 @@ func TestWorkerPool_FailedJob_Retries(t *testing.T) {
 func TestWorkerPool_FailedJob_ExhaustsRetries_MovesToDLQ(t *testing.T) {
 	t.Parallel()
 	store := &mockStore{}
-	pool := NewWorkerPool(2, store)
+	pool := NewWorkerPool(2, store, nil)
 	pool.Register("broken", func(_ context.Context, _ *Job) error {
 		return errors.New("permanent error")
 	})
@@ -157,9 +161,29 @@ func TestWorkerPool_FailedJob_ExhaustsRetries_MovesToDLQ(t *testing.T) {
 	}
 }
 
+func TestWorkerPool_Backoff_CappedAt24h(t *testing.T) {
+	t.Parallel()
+	store := &mockStore{}
+	pool := NewWorkerPool(2, store, nil)
+	pool.Register("slow", func(_ context.Context, _ *Job) error {
+		return errors.New("fail")
+	})
+
+	// attempts=60 would overflow without the cap
+	pool.execute(context.Background(), makeJob("slow", 60, 100))
+
+	if store.lastNextRunAt == nil {
+		t.Fatal("expected nextRunAt to be set")
+	}
+	got := time.Until(*store.lastNextRunAt)
+	if got > 25*time.Hour {
+		t.Errorf("expected backoff capped at 24h, got %v", got)
+	}
+}
+
 func TestWorkerPool_Available(t *testing.T) {
 	t.Parallel()
-	pool := NewWorkerPool(5, &mockStore{})
+	pool := NewWorkerPool(5, &mockStore{}, nil)
 
 	if got := pool.Available(); got != 5 {
 		t.Errorf("expected 5 available, got %d", got)
@@ -175,7 +199,7 @@ func TestWorkerPool_Submit_RunsAsync(t *testing.T) {
 	t.Parallel()
 	done := make(chan struct{})
 	store := &mockStore{onSucceeded: func() { close(done) }}
-	pool := NewWorkerPool(2, store)
+	pool := NewWorkerPool(2, store, nil)
 	pool.Register("async", func(_ context.Context, _ *Job) error { return nil })
 
 	pool.Submit(makeJob("async", 1, 3))
@@ -194,7 +218,7 @@ func TestWorkerPool_ConcurrentSubmit(t *testing.T) {
 	const numJobs = 50
 	var successCount atomic.Int64
 	store := &mockStore{onSucceeded: func() { successCount.Add(1) }}
-	pool := NewWorkerPool(10, store)
+	pool := NewWorkerPool(10, store, nil)
 	pool.Register("concurrent", func(_ context.Context, _ *Job) error { return nil })
 
 	var wg sync.WaitGroup

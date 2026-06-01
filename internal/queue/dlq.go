@@ -2,6 +2,8 @@ package queue
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 )
 
 func (s *PostgresStore) MoveToDLQ(ctx context.Context, job *Job) error {
@@ -54,6 +56,9 @@ func (s *PostgresStore) RequeueDLQ(ctx context.Context, id string) error {
 	var dlj DeadLetterJob
 	err = tx.QueryRowxContext(ctx, `
         DELETE FROM dead_letter_jobs WHERE id = $1 RETURNING *`, id).StructScan(&dlj)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}

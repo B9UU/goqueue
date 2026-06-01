@@ -7,8 +7,17 @@ import (
 	"time"
 )
 
+const maxBodyBytes = 1 * 1024 * 1024 // 1 MB
+
 func middleware(next http.Handler) http.Handler {
-	return recovery(logging(next))
+	return recovery(logging(maxBodyLimit(next)))
+}
+
+func maxBodyLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 type responseWriter struct {
@@ -34,7 +43,7 @@ func recovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
-				slog.Error("panic recovered", "err", err, "stack", debug.Stack())
+				slog.Error("panic recovered", "method", r.Method, "path", r.URL.Path, "err", err, "stack", debug.Stack())
 				writeError(w, http.StatusInternalServerError, "internal server error")
 			}
 		}()
